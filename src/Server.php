@@ -6,6 +6,7 @@ namespace Bloatless\WebSocket;
 
 use Bloatless\WebSocket\Application\ApplicationInterface;
 use Bloatless\WebSocket\Application\StatusApplication;
+use Fiber;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -110,88 +111,116 @@ class Server
         $this->timers = new TimerCollection();
     }
 
-    /**
-     * Main server loop.
-     * Listens for connections, handles connects/disconnects, e.g.
-     *
-     * @return void
-     */
-    public function run(): void
+    protected function prepareLoop(): void
     {
         ob_implicit_flush();
         $this->createSocket($this->host, $this->port);
         $this->openIPCSocket($this->ipcSocketPath);
         $this->log('Server created');
+    }
 
-        while (true) {
-            $this->timers->runAll();
-
-            $changed_sockets = $this->allsockets;
-            @stream_select($changed_sockets, $write, $except, 0, 5000);
-            foreach ($changed_sockets as $socket) {
-                if ($socket == $this->master) {
-                    if (($ressource = stream_socket_accept($this->master)) === false) {
-                        $this->log('Socket error: ' . socket_strerror(socket_last_error($ressource)));
-                        continue;
-                    }
-
-                    $client = $this->createConnection($ressource);
-                    $this->clients[(int)$ressource] = $client;
-                    $this->allsockets[] = $ressource;
-
-                    if (count($this->clients) > $this->maxClients) {
-                        $client->onDisconnect();
-                        if ($this->hasApplication('status')) {
-                            $app = $this->getApplication('status');
-
-                            assert($app instanceof StatusApplication);
-
-                            $app->statusMsg(
-                                'Attention: Client Limit Reached!',
-                                'warning'
-                            );
-                        }
-                        continue;
-                    }
-
-                    $this->addIpToStorage($client->getClientIp());
-                    if ($this->checkMaxConnectionsPerIp($client->getClientIp()) === false) {
-                        $client->onDisconnect();
-                        if ($this->hasApplication('status')) {
-                            $app = $this->getApplication('status');
-
-                            assert($app instanceof StatusApplication);
-
-                            $app->statusMsg(
-                                'Connection/Ip limit for ip ' . $client->getClientIp() . ' was reached!',
-                                'warning'
-                            );
-                        }
-                    }
-                } else {
-                    $client = $this->clients[(int)$socket];
-                    if (!is_object($client)) {
-                        unset($this->clients[(int)$socket]);
-                        continue;
-                    }
-
-                    try {
-                        $data = $this->readBuffer($socket);
-                    } catch (\RuntimeException $e) {
-                        $this->removeClientOnError($client);
-                        continue;
-                    }
-                    $bytes = strlen($data);
-                    if ($bytes === 0) {
-                        $client->onDisconnect();
-                        continue;
-                    }
-
-                    $client->onData($data);
+    protected function handleSockets(): void
+    {
+        $changed_sockets = $this->allsockets;
+        @stream_select($changed_sockets, $write, $except, 0, 5000);
+        foreach ($changed_sockets as $socket) {
+            if ($socket == $this->master) {
+                if (($ressource = stream_socket_accept($this->master)) === false) {
+                    $this->log('Socket error: ' . socket_strerror(socket_last_error($ressource)));
+                    continue;
                 }
+
+                $client = $this->createConnection($ressource);
+                $this->clients[(int)$ressource] = $client;
+                $this->allsockets[] = $ressource;
+
+                if (count($this->clients) > $this->maxClients) {
+                    $client->onDisconnect();
+                    if ($this->hasApplication('status')) {
+                        $app = $this->getApplication('status');
+
+                        assert($app instanceof StatusApplication);
+
+                        $app->statusMsg(
+                            'Attention: Client Limit Reached!',
+                            'warning'
+                        );
+                    }
+                    continue;
+                }
+
+                $this->addIpToStorage($client->getClientIp());
+                if ($this->checkMaxConnectionsPerIp($client->getClientIp()) === false) {
+                    $client->onDisconnect();
+                    if ($this->hasApplication('status')) {
+                        $app = $this->getApplication('status');
+
+                        assert($app instanceof StatusApplication);
+
+                        $app->statusMsg(
+                            'Connection/Ip limit for ip ' . $client->getClientIp() . ' was reached!',
+                            'warning'
+                        );
+                    }
+                }
+
+                continue;
             }
 
-            $this->handleIPC();
+            $client = $this->clients[(int)$socket];
+            if (!is_object($client)) {
+                unset($this->clients[(int)$socket]);
+                continue;
+            }
+
+            try {
+                $data = $this->readBuffer($socket);
+            } catch (\RuntimeException $e) {
+                $this->removeClientOnError($client);
+                continue;
+            }
+            $bytes = strlen($data);
+            if ($bytes === 0) {
+                $client->onDisconnect();
+                continue;
+            }
+
+            $client->onData($data);
+        }
+    }
+
+    /**
+     * Run the main server loop inside a fiber.
+     *
+     * @throws \Throwable
+     */
+    public function runFiber(): Fiber {
+        return new Fiber(function () {
+            $this->prepareLoop();
+
+            while (Fiber::suspend()) {
+                $this->timers->runAll();
+
+                $this->handleSockets();
+
+                $this->handleIPC();
+            }
+        });
+    }
+
+    /**
+     * Main server loop.
+     * Listens for connections, handles connects/disconnects, e.g.
+     *
+     * @return void
+     * @throws \Throwable
+     */
+    public function run(): void
+    {
+        $fiber = $this->runFiber();
+        $fiber->start();
+        while (!$fiber->isTerminated()) {
+            $fiber->resume(true);
         }
     }
 
