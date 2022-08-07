@@ -6,6 +6,7 @@ namespace Bloatless\WebSocket;
 
 use Bloatless\WebSocket\Application\ApplicationInterface;
 use Bloatless\WebSocket\Application\StatusApplication;
+use Psr\Log\LoggerAwareInterface;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -235,6 +236,10 @@ class Server
     public function registerApplication(string $key, ApplicationInterface $application): void
     {
         $this->applications[$key] = $application;
+
+        if ($application instanceof LoggerAwareInterface) {
+            $application->setLogger($this->logger);
+        }
 
         // status is kind of a system-app, needs some special cases:
         if ($key === 'status') {
