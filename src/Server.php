@@ -101,12 +101,12 @@ class Server
     /**
      * @param string $host
      * @param int $port
-     * @param string $ipcSocketPath
+     * @param null|string $ipcSocketPath
      */
     public function __construct(
         private string $host = 'localhost',
         private int $port = 8000,
-        private string $ipcSocketPath = '/tmp/phpwss.sock'
+        private ?string $ipcSocketPath = '/tmp/phpwss.sock'
     ) {
         $this->timers = new TimerCollection();
     }
@@ -121,7 +121,8 @@ class Server
     {
         ob_implicit_flush();
         $this->createSocket($this->host, $this->port);
-        $this->openIPCSocket($this->ipcSocketPath);
+        if ($this->ipcSocketPath)
+            $this->openIPCSocket($this->ipcSocketPath);
         $this->log('Server created');
 
         while (true) {
